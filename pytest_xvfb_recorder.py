@@ -11,56 +11,25 @@ from contextlib import contextmanager
 import pytest
 
 
-@contextmanager
-def redirect_display(new_display):
-    if new_display is not None:
-        old_display = os.environ.get('DISPLAY', None)
-        os.environ['DISPLAY'] = new_display
-        try:
-            yield
-        finally:
-            if old_display is not None:
-                os.environ['DISPLAY'] = old_display
-            else:
-                del os.environ['DISPLAY']
-    else:
-        yield
-
-
-@contextmanager
-def suppress(exception, errnos):
-    try:
-        yield
-    except exception as e:
-        if errno and e.errno not in errnos:
-            raise
-
-
 def pytest_addoption(parser):
     group = parser.getgroup('xvfb_recorder', 'xvfb recorder')
     group.addoption(
         '--xvfb',
         action='store_true',
-        help='run Xvfb for tests; required if --xvfb-recording specified'
+        help='run Xvfb for tests'
     )
     group.addoption(
         '--xvfb-recording',
-        help='record tests (all | none | failed) using ffmpeg',
+        help='record tests run (all | none | failed) using ffmpeg; '
+             'if set --xvfb also required',
         choices=['all', 'none', 'failed'],
         default='none'
     )
     group.addoption(
         '--no-mosaic-filter',
         action='store_true',
-        help='turn off mosaic filter if recording videos with multiple inputs'
+        help='turn off mosaic filter if recording tests with multiple browsers'
     )
-
-
-def pytest_collection_modifyitems(items):
-    reason = "Skipped while running tests with Xvfb"
-    for item in items:
-        if item.get_marker('no_xvfb') and item.config.getoption('--xvfb'):
-            item.add_marker(pytest.mark.skipif(True, reason=reason))
 
 
 def pytest_generate_tests(metafunc):
@@ -77,7 +46,7 @@ def pytest_runtest_makereport(item):
 
 
 @pytest.fixture(scope='session')
-def xvfb_requested(request):
+def _xvfb_set(request):
     if request.config.getoption('--xvfb'):
         # assert Xvfb is available on PATH and is executable
         if any(os.access(os.path.join(path, 'Xvfb'), os.X_OK)
@@ -90,16 +59,16 @@ def xvfb_requested(request):
 
 
 @pytest.fixture(scope='session')
-def recording_option(request, xvfb_requested):
+def _recording_option(request, _xvfb_set):
     recording = request.config.getoption('--xvfb-recording')
     if recording != 'none':
-        if xvfb_requested:
+        if _xvfb_set:
             # assert ffmpeg is available on PATH and is executable
             if not any(os.access(os.path.join(path, 'ffmpeg'), os.X_OK)
                        for path in os.environ['PATH'].split(os.pathsep)):
                 raise EnvironmentError('ffmpeg executable not found.')
         else:
-            raise ValueError('--xvfb-recording requires --xvfb.')
+            raise pytest.UsageError('--xvfb-recording requires --xvfb')
 
     return recording
 
@@ -135,9 +104,8 @@ def movie_dir():
 
 
 @pytest.fixture(scope='module')
-def xvfb(xvfb_requested, screens, screen_width, screen_height, screen_depth):
-
-    if xvfb_requested:
+def xvfb(_xvfb_set, screens, screen_width, screen_height, screen_depth):
+    if _xvfb_set:
         display = _find_free_display()
         cmd = _create_xvfb_cmd(display, screens, screen_width,
                                screen_height, screen_depth)
@@ -160,10 +128,9 @@ def xvfb(xvfb_requested, screens, screen_width, screen_height, screen_depth):
         yield [os.environ.get('DISPLAY', None)]
 
 
-def _find_free_display(min_display_num=1000):
+def _find_free_display(min_display_num=1005):
     tmp_dir = tempfile.gettempdir()
-    pattern = '.X*-lock'
-    lock_files = fnmatch.filter(os.listdir(tmp_dir), pattern)
+    lock_files = fnmatch.filter(os.listdir(tmp_dir), '.X*-lock')
     displays_in_use = (int(name.split('X')[1].split('-')[0])
                        for name in lock_files
                        if os.path.isfile(os.path.join(tmp_dir, name)))
@@ -183,7 +150,7 @@ def _create_xvfb_cmd(display, screens_ids, width, height, depth):
 
 
 @pytest.fixture(scope='function')
-def record_xvfb(request, recording_option, xvfb, movie_dir, mosaic_filter,
+def record_xvfb(request, _recording_option, xvfb, movie_dir, mosaic_filter,
                 screen_width, screen_height):
     if not os.path.exists(movie_dir):
         os.makedirs(movie_dir)
@@ -191,6 +158,10 @@ def record_xvfb(request, recording_option, xvfb, movie_dir, mosaic_filter,
     cmd, paths = _create_ffmpeg_cmd(xvfb, screen_width, screen_height,
                                     movie_dir, request.node.name,
                                     mosaic_filter)
+    for path in paths:
+        with suppress(OSError, errnos=(errno.ENOENT,)):
+            os.remove(path)
+
     with open(os.devnull, 'w') as dev_null:
         proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=dev_null,
                         stderr=dev_null, close_fds=True)
@@ -199,6 +170,7 @@ def record_xvfb(request, recording_option, xvfb, movie_dir, mosaic_filter,
     time.sleep(0.5)
     if proc.poll() is not None:
         raise RuntimeError('ffmpeg did not start')
+    request.node._movies = paths
 
     try:
         yield
@@ -209,7 +181,7 @@ def record_xvfb(request, recording_option, xvfb, movie_dir, mosaic_filter,
                 proc.stdin.close()
 
         test_passed = request.node.setup.passed and request.node.call.passed
-        if recording_option == 'failed' and test_passed:
+        if _recording_option == 'failed' and test_passed:
             for path in paths:
                 with suppress(OSError, errnos=(errno.ENOENT,)):
                     os.remove(path)
@@ -294,3 +266,12 @@ def _gen_offsets(screen_num, width, height):
     for i in xrange(a):
         for j in xrange(b):
             yield int(i*width), int(j*height)
+
+
+@contextmanager
+def suppress(exception, errnos):
+    try:
+        yield
+    except exception as e:
+        if errno and e.errno not in errnos:
+            raise
