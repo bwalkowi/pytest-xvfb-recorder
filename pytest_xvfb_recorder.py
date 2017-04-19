@@ -159,7 +159,7 @@ def record_xvfb(request, _recording_option, xvfb, movie_dir, mosaic_filter,
                                     movie_dir, request.node.name,
                                     mosaic_filter)
     for path in paths:
-        with suppress(OSError, errnos=(errno.ENOENT,)):
+        with suppress(OSError, errnos=(errno.ENOENT, errno.ENAMETOOLONG)):
             os.remove(path)
 
     with open(os.devnull, 'w') as dev_null:
@@ -183,7 +183,7 @@ def record_xvfb(request, _recording_option, xvfb, movie_dir, mosaic_filter,
         test_passed = request.node.setup.passed and request.node.call.passed
         if _recording_option == 'failed' and test_passed:
             for path in paths:
-                with suppress(OSError, errnos=(errno.ENOENT,)):
+                with suppress(OSError, errnos=(errno.ENOENT, errno.ENAMETOOLONG)):
                     os.remove(path)
 
 
