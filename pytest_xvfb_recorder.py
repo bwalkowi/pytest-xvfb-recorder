@@ -42,7 +42,7 @@ def pytest_generate_tests(metafunc):
 def pytest_runtest_makereport(item):
     outcome = yield
     rep = outcome.get_result()
-    setattr(item, rep.when, rep)
+    setattr(item, rep.when + '_xvfb_recorder', rep)
 
 
 @pytest.fixture(scope='session')
@@ -180,7 +180,7 @@ def record_xvfb(request, _recording_option, xvfb, movie_dir, mosaic_filter,
             if not proc.stdin.closed:
                 proc.stdin.close()
 
-        test_passed = request.node.setup.passed and request.node.call.passed
+        test_passed = request.node.setup_xvfb_recorder.passed and request.node.call_xvfb_recorder.passed
         if _recording_option == 'failed' and test_passed:
             for path in paths:
                 with suppress(OSError, errnos=(errno.ENOENT, errno.ENAMETOOLONG)):
